@@ -1,27 +1,27 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-import os, platform, shutil, subprocess, threading, base64, io, tkinter as tk
+import os, sys, platform, shutil, subprocess, threading, base64, io, re
+import tkinter as tk
 from tkinter import messagebox, Toplevel
 
+# ========== 资源路径助手：源码 & PyInstaller 兼容 ==========
+def resource_path(rel: str) -> str:
+    base = getattr(sys, '_MEIPASS', os.path.abspath(os.path.dirname(__file__)))
+    return os.path.join(base, rel)
+
 # ========== 你可以改的配置 ==========
-END_GIF_PATH   = "timer Lee.gif"   # 结束时弹出的 GIF（文件名可带空格）
-END_AUDIO_PATH = "alert.mp3"       # 结束时播放的音频（.mp3/.wav），没有则回退一次蜂鸣
+END_GIF_PATH   = resource_path("timer Lee.gif")   # 结束弹窗 GIF
+END_AUDIO_PATH = resource_path("alert.mp3")       # 结束时播放的音频
+TRAY_ICON_PATH = resource_path("tray.png")        # ← 托盘 PNG 图标（你自己换路径/文件名）
 
-# 结束弹窗 GIF 的缩放策略（两种方式，任选其一）：
-SCALE = None        # 手动比例：None 表示不用手动；整数>=1表示缩小为 1/SCALE；小数<1 表示“放大”(例如 0.5=放大2倍)
-MAX_GIF_SIZE = 500  # 自动目标尺寸：最长边尽量接近这个像素（SCALE 为 None 时生效；<=0 则关闭自动）
-ANIM_INTERVAL_MS = 100  # GIF 播放间隔
+# GIF 缩放策略（二选一）：
+SCALE = None        # 手动比例：None=不用手动；整数>=1=缩小为 1/SCALE；小数<1=放大为 1/SCALE（0.5=放大2倍）
+MAX_GIF_SIZE = 500  # 自动目标尺寸：最长边尽量接近该像素（仅当 SCALE 为 None；≤0 关闭自动）
+ANIM_INTERVAL_MS = 100  # 结束弹窗 GIF 播放间隔
 
-# 页眉内嵌熊猫 GIF（占位，可换成你自己的 base64）
+# 页眉内嵌熊猫 GIF（占位 demo，可换成你的 base64）
 PANDA_GIF_B64 = """
 R0lGODlhIAAgAKECAAAAAP///wAAAMLCwgAAACH5BAEKAAIALAAAAAAgACAAAALheLrc/jDKSau9OOvNu/9gKI5kaZ5oqq5s674vq9wFADs=
-"""
-
-# 托盘图标（16x16 PNG 占位，可选）
-TRAY_ICON_PNG_B64 = """
-iVBORw0KGgoAAAANSUhEUgAAABAAAAAQCAMAAAAoLQ9TAAAAXVBMVEUAAAD/////////////////////////////////////////////////////////////
-///////////////////////////8AAABlPj8mAAAAGnRSTlMAAQIDBAUGBwgJCgsMDQ4PEBESExQVFhcYGRs9X7mPAAAAQElEQVQY02NgQAZGJmBkYGBg
-YJgBAMaBExgYpIhEwQEGwYQmQGAAkQbCkQZBgQjB8DgkQwEGgY1gQkGgYwYF0gJgZkGAAAPwQm3w5qf2sAAAAASUVORK5CYII=
 """
 
 # ---------- 最兜底蜂鸣 ----------
@@ -105,14 +105,13 @@ class AudioController:
 
 AUDIO = AudioController(END_AUDIO_PATH)
 
-# ---------- 计算 zoom/subsample 实现放大/缩小 ----------
+# ---------- 计算 zoom/subsample（支持放大/缩小） ----------
 def pick_zoom_subsample(orig_w, orig_h, SCALE, MAX_GIF_SIZE):
     """
     返回 (zoom, subsample) 两个整数因子，最终缩放比例 = zoom / subsample
-    规则：
-      - 若 SCALE 是数值：
-          * SCALE >= 1 表示“缩小为 1/SCALE”（兼容旧逻辑）
-          * SCALE  < 1 表示“放大为 1/SCALE”（例如 0.5 => 放大 2x）
+      - 若 SCALE 为数值：
+          * SCALE >= 1 → 缩小为 1/SCALE
+          * SCALE <  1 → 放大为 1/SCALE（例：0.5=放大2倍）
       - 否则按 MAX_GIF_SIZE 自动缩放，使最长边尽量接近该值（四舍五入，不会缩过头）
     """
     z, s = 1, 1
@@ -127,9 +126,9 @@ def pick_zoom_subsample(orig_w, orig_h, SCALE, MAX_GIF_SIZE):
     if MAX_GIF_SIZE and MAX_GIF_SIZE > 0 and orig_w and orig_h:
         longest = max(orig_w, orig_h)
         ratio = MAX_GIF_SIZE / float(longest)
-        if ratio > 1:    # 放大（四舍五入）
+        if ratio > 1:    # 放大
             z = max(1, int(round(ratio)))
-        elif ratio < 1:  # 缩小（四舍五入）
+        elif ratio < 1:  # 缩小
             s = max(1, int(round(1.0 / ratio)))
     return z, s
 
@@ -170,30 +169,46 @@ def show_end_gif_popup(root):
     x, y = (sw - w) // 2, (sh - h) // 3
     top.geometry(f"+{x}+{y}")
 
-    lbl = tk.Label(top)
+    # 内容
+    body = tk.Frame(top)
+    body.pack(padx=10, pady=(10, 6))
+
+    lbl = tk.Label(body)
     lbl.pack()
 
     def animate(i=0):
         if not frames:
-            lbl.config(text="(未找到 GIF: %s)" % END_GIF_PATH)
+            lbl.config(text=f"(未找到 GIF: {END_GIF_PATH})")
         else:
             lbl.configure(image=frames[i])
             top.after(ANIM_INTERVAL_MS, animate, (i + 1) % len(frames))
     animate()
 
-    # 播放音频
-    AUDIO.play()
+    # 底部按钮
+    btns = tk.Frame(top)
+    btns.pack(pady=(6, 10))
 
-    # 关闭时：先停音频再销毁
     def close(_=None):
         try: AUDIO.stop()
         finally:
             try: top.destroy()
             except Exception: pass
 
+    tk.Button(btns, text="Close", width=10, command=close).pack()
+
+    # 播放音频
+    AUDIO.play()
+
+    # 仅允许 Esc / × 关闭；不绑定整窗点击关闭
     top.bind("<Escape>", close)
-    #top.bind("<Button-1>", close)
     top.protocol("WM_DELETE_WINDOW", close)
+
+    # 可选：模态
+    try:
+        top.transient(root)
+        top.grab_set()
+    except Exception:
+        pass
 
 # ================== 主 App ==================
 class TimerApp:
@@ -249,7 +264,7 @@ class TimerApp:
         self.btn_pause.grid(row=0, column=1, padx=4)
         self.btn_reset.grid(row=0, column=2, padx=4)
 
-        # 选项（保留额外蜂鸣开关，默认 False 以免和音频重复）
+        # 选项（额外蜂鸣，默认 False 以免和 mp3 重叠）
         opt = tk.Frame(root, padx=10, pady=2); opt.pack()
         self.sound_var = tk.BooleanVar(value=False)
         tk.Checkbutton(opt, text="Extra beep", variable=self.sound_var).grid(row=0, column=0, padx=4)
@@ -303,7 +318,8 @@ class TimerApp:
     def _load_embedded_gif(self, b64string):
         self.gif_frames, self.gif_index, self._gif_job = [], 0, None
         b64_clean = (b64string or "").strip()
-        def _try(data):
+
+        def _try_load(data):
             i = 0
             while True:
                 try:
@@ -311,11 +327,11 @@ class TimerApp:
                     self.gif_frames.append(frm); i += 1
                 except Exception:
                     break
-        _try(b64_clean)
+
+        _try_load(b64_clean)
         if not self.gif_frames:
             try:
-                import base64 as _b64
-                _try(_b64.b64decode(b64_clean))
+                _try_load(base64.b64decode(re.sub(r"\s+", "", b64_clean)))
             except Exception:
                 pass
         if self.gif_frames:
@@ -388,7 +404,7 @@ class TimerApp:
         if self.remaining <= 0:
             self.running = False; self._refresh_buttons()
             self.time_label.config(text="00:00")
-            # —— 结束动作：弹窗 GIF + 播放音频（关闭即停）
+            # 结束动作：弹窗 GIF + 播放音频（关闭即停）
             show_end_gif_popup(self.root)
             if self.sound_var.get(): _beep_fallback()  # 可选额外“哔”
             self._on_phase_finished(); return
@@ -469,40 +485,40 @@ class TimerApp:
             else:
                 self.running = False; self._set_phase("Idle"); self._refresh_buttons()
 
-    # ------- 托盘（可选） -------
+    # ------- 托盘（PNG 文件；可选） -------
     def _init_tray(self):
         try:
             import pystray
             from PIL import Image
+
+            if not os.path.exists(TRAY_ICON_PATH):
+                self.tray = None
+                return
+
+            img = Image.open(TRAY_ICON_PATH).convert("RGBA")
+
+            def on_show(icon, item=None): self.root.after(0, self._show_window)
+            def on_hide(icon, item=None): self.root.after(0, self._hide_window)
+            def on_start_pomo(icon, item=None): self.root.after(0, self.start_pomodoro)
+            def on_pause_resume(icon, item=None):
+                self.root.after(0, (self.pause if self.running else self._toggle_pause))
+            def on_stop(icon, item=None): self.root.after(0, self.stop_pomodoro)
+            def on_quit(icon, item=None): self.root.after(0, self._quit_all)
+
+            menu = pystray.Menu(
+                pystray.MenuItem("Show Window", on_show),
+                pystray.MenuItem("Hide Window", on_hide),
+                pystray.MenuItem("Start Pomodoro", on_start_pomo),
+                pystray.MenuItem("Pause/Resume", on_pause_resume),
+                pystray.MenuItem("Stop Pomodoro", on_stop),
+                pystray.Menu.SEPARATOR,
+                pystray.MenuItem("Quit", on_quit)
+            )
+
+            self.tray = pystray.Icon("PandaPomodoro", img, "Panda Pomodoro", menu)
+            threading.Thread(target=lambda: self.tray.run(), daemon=True).start()
         except Exception:
-            self.tray = None; return
-
-        img_bytes = base64.b64decode(TRAY_ICON_PNG_B64)
-        try:
-            img = Image.open(io.BytesIO(img_bytes))
-        except Exception:
-            self.tray = None; return
-
-        def on_show(icon, item=None): self.root.after(0, self._show_window)
-        def on_hide(icon, item=None): self.root.after(0, self._hide_window)
-        def on_start_pomo(icon, item=None): self.root.after(0, self.start_pomodoro)
-        def on_pause_resume(icon, item=None):
-            self.root.after(0, (self.pause if self.running else self._toggle_pause))
-        def on_stop(icon, item=None): self.root.after(0, self.stop_pomodoro)
-        def on_quit(icon, item=None): self.root.after(0, self._quit_all)
-
-        import pystray
-        menu = pystray.Menu(
-            pystray.MenuItem("Show Window", on_show),
-            pystray.MenuItem("Hide Window", on_hide),
-            pystray.MenuItem("Start Pomodoro", on_start_pomo),
-            pystray.MenuItem("Pause/Resume", on_pause_resume),
-            pystray.MenuItem("Stop Pomodoro", on_stop),
-            pystray.Menu.SEPARATOR,
-            pystray.MenuItem("Quit", on_quit)
-        )
-        self.tray = pystray.Icon("PandaPomodoro", img, "Panda Pomodoro", menu)
-        threading.Thread(target=lambda: self.tray.run(), daemon=True).start()
+            self.tray = None
 
     def _show_window(self):
         self.root.deiconify()
